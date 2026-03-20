@@ -1,7 +1,9 @@
 from flask import Flask, render_template, request, flash, redirect, url_for
 import pandas as pd
 import torch
-from model import collaborative_filtering, content_based_filtering, hybrid_recommendation, MultiModalModel
+from model import (collaborative_filtering, content_based_filtering, hybrid_recommendation,
+                   weighted_hybrid_recommendation, get_dynamic_weights, diversify_recommendations,
+                   MultiModalModel)
 import logging
 
 app = Flask(__name__)
@@ -9,16 +11,40 @@ app.secret_key = 'your-secret-key'
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# Load data from datasets folder
+import os
+DATA_DIR = os.path.join(os.path.dirname(__file__), 'datasets')
+
+# Config: Set to True to use filtered dataset (high-confidence products only)
+USE_FILTERED_DATASET = True
+
+def load_data(use_filtered=False):
+    """Load dataset with optional filtering"""
+    if use_filtered:
+        filtered_dir = os.path.join(DATA_DIR, 'filtered')
+        users = pd.read_csv(os.path.join(DATA_DIR, 'users_expanded.csv'))
+        products = pd.read_csv(os.path.join(filtered_dir, 'products_filtered.csv'))
+        purchases = pd.read_csv(os.path.join(filtered_dir, 'purchases_filtered.csv'))
+        browsing_history = pd.read_csv(os.path.join(filtered_dir, 'browsing_filtered.csv'))
+        logger.info(f"[LOADED] Filtered dataset: {len(products)} products, {len(purchases)} purchases")
+    else:
+        users = pd.read_csv(os.path.join(DATA_DIR, 'users_expanded.csv'))
+        products = pd.read_csv(os.path.join(DATA_DIR, 'products_expanded.csv'))
+        purchases = pd.read_csv(os.path.join(DATA_DIR, 'purchases_expanded.csv'))
+        browsing_history = pd.read_csv(os.path.join(DATA_DIR, 'browsing_history_expanded.csv'))
+        logger.info(f"[LOADED] Full dataset: {len(products)} products, {len(purchases)} purchases")
+
+    product_images = pd.read_csv(os.path.join(DATA_DIR, 'product_images_expanded.csv'))
+    return users, products, purchases, browsing_history, product_images
+
 # Load data
-users = pd.read_csv('users_expanded.csv')
-products = pd.read_csv('products_expanded.csv')
-product_images = pd.read_csv('product_images_expanded.csv')
+users, products, purchases, browsing_history, product_images = load_data(use_filtered=USE_FILTERED_DATASET)
+
 # Initialize multi-modal model
 num_users = users['user_id'].nunique()
 num_products = products['product_id'].nunique()
 model = MultiModalModel(num_users, num_products)
-purchases = pd.read_csv('purchases_expanded.csv')
-browsing_history = pd.read_csv('browsing_history_expanded.csv')
+logger.info(f"[CONFIG] Using {'FILTERED' if USE_FILTERED_DATASET else 'FULL'} dataset for recommendations")
 
 @app.route('/')
 def index():
@@ -38,7 +64,7 @@ def get_recommendations():
         # Get interacted products
         purchased_product_ids = purchases[purchases['user_id'] == user_id]['product_id'].unique()
         browsed_product_ids = browsing_history[browsing_history['user_id'] == user_id]['product_id'].unique()
-        interacted_products = products[products['product_id'].isin(purchased_product_ids) | 
+        interacted_products = products[products['product_id'].isin(purchased_product_ids) |
                                       products['product_id'].isin(browsed_product_ids)].copy()
         interacted_products['source'] = interacted_products['product_id'].apply(
             lambda x: 'Purchased' if x in purchased_product_ids else 'Browsed'
@@ -52,12 +78,35 @@ def get_recommendations():
             recommendations = content_based_filtering(user_id, purchases, browsing_history, products)
         elif algorithm == 'hybrid':
             recommendations = hybrid_recommendation(user_id, purchases, browsing_history, products)
+        elif algorithm == 'weighted-hybrid':
+            # Get dynamic weights based on user interaction count
+            alpha, beta, gamma = get_dynamic_weights(user_id, purchases, browsing_history)
+            recommendations = weighted_hybrid_recommendation(user_id, purchases, browsing_history,
+                                                           products, alpha=alpha, beta=beta, gamma=gamma)
+            # Diversify by category
+            recommendations = diversify_recommendations(recommendations, k=20)
+        elif algorithm == 'improved':
+            # NEW: Improved algorithm using filtered dataset or weighted-hybrid with boosting
+            alpha, beta, gamma = get_dynamic_weights(user_id, purchases, browsing_history)
+            recommendations = weighted_hybrid_recommendation(user_id, purchases, browsing_history,
+                                                           products, alpha=alpha, beta=beta, gamma=gamma)
+
+            # Boost scores for products with high interaction count (confidence-based)
+            purchases_per_product = purchases.groupby('product_id').size()
+            high_confidence_threshold = 20  # Same as filtering threshold
+            recommendations['confidence'] = recommendations['product_id'].map(
+                lambda pid: 1.0 if pid in purchases_per_product.index and purchases_per_product[pid] >= high_confidence_threshold else 0.5
+            ).fillna(0.5)
+            recommendations['score'] = recommendations['score'] * recommendations['confidence']
+
+            # Diversify by category
+            recommendations = diversify_recommendations(recommendations, k=20)
         elif algorithm == 'multi-modal':
             # Prepare multi-modal inputs
             # Adjust product IDs to be 0-indexed for the embedding layer
             product_ids = torch.LongTensor(products['product_id'].values) - 1
             texts = products['description'].tolist()
-            
+
             # Generate recommendations using all available modalities
             with torch.no_grad():
                 outputs = model(
@@ -65,29 +114,31 @@ def get_recommendations():
                     product_ids,
                     texts,
                     edge_index=None,
-                    product_images_df=product_images
+                    product_images_df=None
                 )
-            
+
             # Calculate recommendation scores
             scores = outputs.mean(dim=1).cpu().numpy()
-            
+
             # Create recommendations dataframe
             recommendations = products.copy()
             recommendations['score'] = scores
             recommendations['source'] = 'Multi-Modal'
+            # Diversify multi-modal as well
+            recommendations = diversify_recommendations(recommendations, k=20)
         else:
             flash('Invalid algorithm selected!')
             return redirect(url_for('index'))
 
         # Filter out interacted products
-        recommended_products = recommendations[~recommendations['product_id'].isin(purchased_product_ids) & 
+        recommended_products = recommendations[~recommendations['product_id'].isin(purchased_product_ids) &
                                                ~recommendations['product_id'].isin(browsed_product_ids)].copy()
         logger.debug(f"Filtered recommendations:\n{recommended_products[['product_id', 'score', 'source']]}")
 
         if recommended_products.empty:
             flash('No recommendations available for this user.')
 
-        return render_template('recommendations.html', 
+        return render_template('recommendations.html',
                              interacted_products=interacted_products.to_dict(orient='records'),
                              recommended_products=recommended_products.to_dict(orient='records'))
     except Exception as e:

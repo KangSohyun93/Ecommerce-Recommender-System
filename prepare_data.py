@@ -14,7 +14,7 @@ np.random.seed(42)
 # Paths
 DATASET_PATH = "datasets"
 ANNO_COARSE = os.path.join(DATASET_PATH, "Anno_coarse")
-OUTPUT_DIR = "."
+OUTPUT_DIR = os.path.join(DATASET_PATH)  # Save to datasets folder
 
 # Category mapping
 CATEGORIES = {

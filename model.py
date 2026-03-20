@@ -53,7 +53,7 @@ def content_based_filtering(user_id, purchases, browsing_history, products):
 
 def hybrid_recommendation(user_id, purchases, browsing_history, products):
     logger.debug(f"Hybrid Recommendation for user_id: {user_id}")
-    
+
     user_purchases = purchases[purchases['user_id'] == user_id]['product_id'].unique()
     user_browsed = browsing_history[browsing_history['user_id'] == user_id]['product_id'].unique()
     user_history = set(user_purchases).union(user_browsed)
@@ -68,7 +68,7 @@ def hybrid_recommendation(user_id, purchases, browsing_history, products):
     if all_recommendations.empty:
         logger.debug("No recommendations; adding popular products.")
         popular_products = purchases['product_id'].value_counts().head(3).index
-        all_recommendations = products[products['product_id'].isin(popular_products) & 
+        all_recommendations = products[products['product_id'].isin(popular_products) &
                                       ~products['product_id'].isin(user_history)].copy()
         all_recommendations['score'] = 0.5
         all_recommendations['source'] = 'Popular Products'
@@ -76,8 +76,161 @@ def hybrid_recommendation(user_id, purchases, browsing_history, products):
     final_recommendations = all_recommendations.sort_values(by='score', ascending=False) \
                                                .drop_duplicates(subset=['product_id'], keep='first')
     logger.debug(f"Final hybrid recommendations:\n{final_recommendations[['product_id', 'score', 'source']]}")
-    
+
     return final_recommendations
+
+def get_dynamic_weights(user_id, purchases, browsing_history):
+    """
+    Tính Dynamic Weights dựa vào số lần tương tác của user
+
+    Trả về: (alpha, beta, gamma) - Trọng số cho CF, CB, Deep Learning
+
+    Rules:
+    - User mới (< 3 interactions): Ưu tiên CB (0.1, 0.8, 0.1)
+    - User trung bình (3-10): Chia đều CF và CB (0.5, 0.4, 0.1)
+    - User trung thành (> 10): Ưu tiên CF (0.7, 0.2, 0.1)
+    """
+    user_purchases = purchases[purchases['user_id'] == user_id]['product_id'].nunique()
+    user_browsed = browsing_history[browsing_history['user_id'] == user_id]['product_id'].nunique()
+    total_interactions = user_purchases + user_browsed
+
+    logger.debug(f"User {user_id}: {total_interactions} interactions (P:{user_purchases}, B:{user_browsed})")
+
+    if total_interactions < 3:
+        weights = (0.1, 0.8, 0.1)  # New user: prioritize CB
+        logger.debug(f"→ New User (< 3): weights={weights}")
+    elif total_interactions < 10:
+        weights = (0.5, 0.4, 0.1)  # Medium user: balanced
+        logger.debug(f"→ Medium User (3-10): weights={weights}")
+    else:
+        weights = (0.7, 0.2, 0.1)  # Loyal user: prioritize CF
+        logger.debug(f"→ Loyal User (> 10): weights={weights}")
+
+    return weights
+
+def normalize_scores(scores):
+    """Normalize điểm từ 0-1 cho các phương pháp"""
+    if len(scores) == 0:
+        return scores
+    min_score = scores.min()
+    max_score = scores.max()
+    if max_score == min_score:
+        return pd.Series([0.5] * len(scores), index=scores.index)
+    return (scores - min_score) / (max_score - min_score)
+
+def weighted_hybrid_recommendation(user_id, purchases, browsing_history, products, alpha=0.5, beta=0.4, gamma=0.1):
+    """
+    Weighted Hybrid với Dynamic Weights
+
+    alpha: Trọng số Collaborative Filtering
+    beta: Trọng số Content-Based Filtering
+    gamma: Trọng số Deep Learning (nếu có)
+    """
+    logger.debug(f"Weighted Hybrid (α={alpha}, β={beta}, γ={gamma}) for user_id: {user_id}")
+
+    user_purchases = purchases[purchases['user_id'] == user_id]['product_id'].unique()
+    user_browsed = browsing_history[browsing_history['user_id'] == user_id]['product_id'].unique()
+    user_history = set(user_purchases).union(user_browsed)
+
+    # Get recommendations from each algorithm
+    collab_recs = collaborative_filtering(user_id, purchases, products)
+    content_recs = content_based_filtering(user_id, purchases, browsing_history, products)
+
+    # Normalize scores to 0-1 range
+    collab_recs = collab_recs.copy()
+    content_recs = content_recs.copy()
+
+    collab_recs['norm_score'] = normalize_scores(collab_recs['score'])
+    content_recs['norm_score'] = normalize_scores(content_recs['score'])
+
+    logger.debug(f"CF: {len(collab_recs)} recs (avg score: {collab_recs['norm_score'].mean():.3f})")
+    logger.debug(f"CB: {len(content_recs)} recs (avg score: {content_recs['norm_score'].mean():.3f})")
+
+    # Merge all recommendations and calculate weighted score
+    merged = pd.concat([collab_recs, content_recs], ignore_index=True)
+
+    # Group by product_id and calculate weighted score
+    final_recs = []
+    for product_id in merged['product_id'].unique():
+        product_data = merged[merged['product_id'] == product_id]
+
+        # Get normalized scores from each source
+        cf_score = product_data[product_data['source'] == 'Collaborative Filtering']['norm_score'].values
+        cf_score = cf_score[0] if len(cf_score) > 0 else 0
+
+        cb_score = product_data[product_data['source'] == 'Content-Based Filtering']['norm_score'].values
+        cb_score = cb_score[0] if len(cb_score) > 0 else 0
+
+        # Calculate weighted score
+        weighted_score = (alpha * cf_score) + (beta * cb_score)
+
+        # Get product info from first match
+        product_info = product_data.iloc[0]
+
+        final_recs.append({
+            'product_id': product_id,
+            'name': product_info['name'],
+            'category': product_info['category'],
+            'description': product_info['description'],
+            'price': product_info['price'],
+            'rating': product_info['rating'],
+            'score': weighted_score,
+            'source': 'Weighted Hybrid'
+        })
+
+    final_recs_df = pd.DataFrame(final_recs)
+
+    if final_recs_df.empty:
+        logger.debug("No recommendations; adding popular products.")
+        popular_products = purchases['product_id'].value_counts().head(5).index
+        final_recs_df = products[products['product_id'].isin(popular_products) &
+                                ~products['product_id'].isin(user_history)].copy()
+        final_recs_df['score'] = 0.5
+        final_recs_df['source'] = 'Popular Products'
+
+    final_recs_df = final_recs_df.sort_values(by='score', ascending=False)
+    logger.debug(f"Final weighted hybrid: {len(final_recs_df)} recs")
+
+    return final_recs_df
+
+def diversify_recommendations(recommendations, k=5):
+    """
+    Filter recommendations để tăng diversity theo category
+
+    Ưu tiên: Category - Score - Diversity
+    """
+    if len(recommendations) == 0:
+        return recommendations
+
+    selected = []
+    seen_categories = set()
+
+    # Sắp xếp theo score
+    sorted_recs = recommendations.sort_values(by='score', ascending=False)
+
+    # Chọn từng category khác nhau
+    for idx, row in sorted_recs.iterrows():
+        category = row['category']
+
+        # Nếu chưa chọn category này, thêm vào
+        if category not in seen_categories:
+            selected.append(row)
+            seen_categories.add(category)
+            if len(selected) == k:
+                break
+
+    # Nếu không đủ k sản phẩm, thêm từ category trùng (high score)
+    if len(selected) < k:
+        for idx, row in sorted_recs.iterrows():
+            if len(selected) == k:
+                break
+            if row['product_id'] not in [s['product_id'] for s in selected]:
+                selected.append(row)
+
+    result_df = pd.DataFrame(selected)
+    logger.debug(f"Diversified: {len(result_df)} items, {len(seen_categories)} categories")
+
+    return result_df
 
 class MultiModalModel(nn.Module):
     def __init__(self, num_users, num_products, embedding_dim=128):
