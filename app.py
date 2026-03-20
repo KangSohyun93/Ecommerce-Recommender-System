@@ -4,7 +4,9 @@ import torch
 from model import (collaborative_filtering, content_based_filtering, hybrid_recommendation,
                    weighted_hybrid_recommendation, get_dynamic_weights, diversify_recommendations,
                    MultiModalModel)
+from premium_algorithm import classify_user_segment, calculate_popularity_score
 import logging
+import numpy as np
 
 app = Flask(__name__)
 app.secret_key = 'your-secret-key'
@@ -98,6 +100,40 @@ def get_recommendations():
                 lambda pid: 1.0 if pid in purchases_per_product.index and purchases_per_product[pid] >= high_confidence_threshold else 0.5
             ).fillna(0.5)
             recommendations['score'] = recommendations['score'] * recommendations['confidence']
+
+            # Diversify by category
+            recommendations = diversify_recommendations(recommendations, k=20)
+        elif algorithm == 'premium':
+            # PREMIUM v2.0: Ensemble + Recency + User Segmentation
+            alpha, beta, gamma = get_dynamic_weights(user_id, purchases, browsing_history)
+            recommendations = weighted_hybrid_recommendation(user_id, purchases, browsing_history,
+                                                           products, alpha=alpha, beta=beta, gamma=gamma)
+
+            # Get user segment
+            segment, segment_weights = classify_user_segment(user_id, purchases, browsing_history)
+
+            # Calculate popularity scores
+            popularity_scores = calculate_popularity_score(purchases, products)
+
+            # Build ensemble scores
+            cf_scores = recommendations['score'].values
+            cb_scores = recommendations['score'].values * 0.8  # Reduce CB slightly
+
+            # Normalize
+            cf_norm = (cf_scores - cf_scores.min()) / (cf_scores.max() - cf_scores.min() + 1e-5)
+            cb_norm = (cb_scores - cb_scores.min()) / (cb_scores.max() - cb_scores.min() + 1e-5)
+            pop_array = np.array([popularity_scores.get(pid, 0.0) for pid in recommendations['product_id'].values])
+            pop_norm = (pop_array - pop_array.min()) / (pop_array.max() - pop_array.min() + 1e-5)
+
+            # Apply segment weights (all LOYAL in filtered dataset)
+            recommendations['score'] = (
+                segment_weights['cf'] * cf_norm +
+                segment_weights['cb'] * cb_norm +
+                segment_weights['pop'] * pop_norm
+            )
+
+            recommendations['segment'] = segment
+            recommendations['source'] = f'Premium+ ({segment})'
 
             # Diversify by category
             recommendations = diversify_recommendations(recommendations, k=20)
