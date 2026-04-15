@@ -53,7 +53,6 @@ def content_based_filtering(user_id, purchases, browsing_history, products):
 
 def hybrid_recommendation(user_id, purchases, browsing_history, products):
     logger.debug(f"Hybrid Recommendation for user_id: {user_id}")
-
     user_purchases = purchases[purchases['user_id'] == user_id]['product_id'].unique()
     user_browsed = browsing_history[browsing_history['user_id'] == user_id]['product_id'].unique()
     user_history = set(user_purchases).union(user_browsed)
@@ -80,16 +79,6 @@ def hybrid_recommendation(user_id, purchases, browsing_history, products):
     return final_recommendations
 
 def get_dynamic_weights(user_id, purchases, browsing_history):
-    """
-    Tính Dynamic Weights dựa vào số lần tương tác của user
-
-    Trả về: (alpha, beta, gamma) - Trọng số cho CF, CB, Deep Learning
-
-    Rules:
-    - User mới (< 3 interactions): Ưu tiên CB (0.1, 0.8, 0.1)
-    - User trung bình (3-10): Chia đều CF và CB (0.5, 0.4, 0.1)
-    - User trung thành (> 10): Ưu tiên CF (0.7, 0.2, 0.1)
-    """
     user_purchases = purchases[purchases['user_id'] == user_id]['product_id'].nunique()
     user_browsed = browsing_history[browsing_history['user_id'] == user_id]['product_id'].nunique()
     total_interactions = user_purchases + user_browsed
@@ -119,13 +108,6 @@ def normalize_scores(scores):
     return (scores - min_score) / (max_score - min_score)
 
 def weighted_hybrid_recommendation(user_id, purchases, browsing_history, products, alpha=0.5, beta=0.4, gamma=0.1):
-    """
-    Weighted Hybrid với Dynamic Weights
-
-    alpha: Trọng số Collaborative Filtering
-    beta: Trọng số Content-Based Filtering
-    gamma: Trọng số Deep Learning (nếu có)
-    """
     logger.debug(f"Weighted Hybrid (α={alpha}, β={beta}, γ={gamma}) for user_id: {user_id}")
 
     user_purchases = purchases[purchases['user_id'] == user_id]['product_id'].unique()
@@ -161,7 +143,7 @@ def weighted_hybrid_recommendation(user_id, purchases, browsing_history, product
         cb_score = product_data[product_data['source'] == 'Content-Based Filtering']['norm_score'].values
         cb_score = cb_score[0] if len(cb_score) > 0 else 0
 
-        # Calculate weighted score
+        # Weighted Score Formula: Score = α×CF_norm + β×CB_norm (α+β ≤ 1.0)
         weighted_score = (alpha * cf_score) + (beta * cb_score)
 
         # Get product info from first match
@@ -194,11 +176,6 @@ def weighted_hybrid_recommendation(user_id, purchases, browsing_history, product
     return final_recs_df
 
 def diversify_recommendations(recommendations, k=5):
-    """
-    Filter recommendations để tăng diversity theo category
-
-    Ưu tiên: Category - Score - Diversity
-    """
     if len(recommendations) == 0:
         return recommendations
 
@@ -265,6 +242,11 @@ class MultiModalModel(nn.Module):
         self.fusion = nn.Linear(embedding_dim * 3, embedding_dim)
 
     def forward(self, user_ids, product_ids, text_batch, edge_index, product_images_df=None):
+        """
+        Multi-Modal Formula: Final_embedding = Concat(User_emb, Product_emb, Image_features, Text_features)
+        Score = Cosine_similarity(user_embedding, product_embedding) - Combines 4 modalities
+        Điểm = Cosine_similarity(người dùng_nhúng, sản_phẩm_nhúng) từ 4 phương thức (ảnh, text, CF, GNN)
+        """
         # Collaborative features
         user_emb = self.user_emb(user_ids)
         product_emb = self.product_emb(product_ids)

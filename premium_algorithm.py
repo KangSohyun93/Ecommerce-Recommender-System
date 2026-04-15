@@ -1,17 +1,13 @@
-#!/usr/bin/env python
-"""
-Premium Algorithm v2.0 - Ensemble + Recency + User Segmentation
-Expected: 30-60% improvement over standard Improved algorithm
-"""
-
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
 def classify_user_segment(user_id, purchases, browsing_history):
     """
-    Classify user into segment for adaptive algorithm
-    Returns: ('NEW', 'ACTIVE', 'LOYAL', weights_dict)
+    User Segmentation Formula: Segment = classify(total_interactions)
+    where interactions = unique_products_purchased + unique_products_browsed
+    Returns: ('NEW':<5, 'ACTIVE':5-20, 'LOYAL':>20) + adaptive weights
+    Phân loại người dùng dựa trên số lần tương tác = mua + xem
     """
     user_purchases = purchases[purchases['user_id'] == user_id]['product_id'].nunique()
     user_browsed = browsing_history[browsing_history['user_id'] == user_id]['product_id'].nunique()
@@ -26,8 +22,9 @@ def classify_user_segment(user_id, purchases, browsing_history):
 
 def calculate_recency_weight(purchase_dates_by_product, days_window=60):
     """
-    Calculate recency weight for each product
-    Recent purchases = higher weight
+    Recency Weight Formula: weight = min(1.0, purchase_count / (days_window/30))
+    Logic: More recent purchases and higher frequency → higher recency weight
+    Tiếng Việt: Trọng số gần đây = min(1.0, số lần mua / (cửa_sổ_ngày/30))
     """
     if not hasattr(purchase_dates_by_product, '__iter__'):
         return {}
@@ -44,10 +41,9 @@ def calculate_recency_weight(purchase_dates_by_product, days_window=60):
 
 def calculate_popularity_score(purchases, products):
     """
-    Calculate product popularity based on:
-    - Purchase frequency
-    - Unique buyers
-    - Trending (recent purchases boost)
+    Popularity Score Formula: score = 0.6×(freq/max_freq) + 0.4×(unique_buyers/max_buyers)
+    Logic: Weighted combination of purchase frequency and buyer diversity
+    Tiếng Việt: Điểm phổ biến = 0.6×(tần_suất/max) + 0.4×(độc_nhất_mua/max)
     """
     purchase_freq = purchases.groupby('product_id').size()
     unique_buyers = purchases.groupby('product_id')['user_id'].nunique()
@@ -57,7 +53,7 @@ def calculate_popularity_score(purchases, products):
         if product_id in purchase_freq.index:
             freq_score = purchase_freq[product_id] / purchase_freq.max()
             buyer_score = unique_buyers[product_id] / unique_buyers.max()
-            # Weighted combination
+            # Weighted Popularity Formula: 0.6×frequency + 0.4×buyer_diversity
             popularity_scores[product_id] = 0.6 * freq_score + 0.4 * buyer_score
         else:
             popularity_scores[product_id] = 0.0
